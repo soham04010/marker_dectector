@@ -2,6 +2,15 @@
   "expo": {
     "name": "MarkerDetector",
     "slug": "MarkerDetector",
-    "version": "1.0.0"
+    "version": "1.0.0",
+    "plugins": [
+      "expo-asset",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow MarkerDetector to access your camera to scan markers."
+        }
+      ]
+    ]
   }
 }
