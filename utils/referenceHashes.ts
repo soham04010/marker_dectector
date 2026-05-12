@@ -32,8 +32,16 @@ export async function loadReferenceImages(): Promise<number> {
 export function isReferencesReady(): boolean { return loaded; }
 
 async function computeFeaturesFromAsset(img: TestImage) {
+  console.log(`[Refs] Loading asset: ${img.name}...`);
+
   const [asset] = await Asset.loadAsync(img.source);
   const uri = asset.localUri || asset.uri;
+
+  if (!uri) {
+    throw new Error(`No URI for asset "${img.name}" — asset may not be bundled`);
+  }
+
+  console.log(`[Refs] Asset "${img.name}" URI: ${uri.substring(0, 60)}...`);
 
   const resized = await ImageManipulator.manipulateAsync(
     uri,
@@ -41,11 +49,17 @@ async function computeFeaturesFromAsset(img: TestImage) {
     { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG, base64: true }
   );
 
+  if (!resized.base64) {
+    throw new Error(`No base64 data after resize for "${img.name}"`);
+  }
+
   const jpeg = require('jpeg-js');
   const { Buffer } = require('buffer');
-  const decoded = jpeg.decode(Buffer.from(resized.base64!, 'base64'), {
+  const decoded = jpeg.decode(Buffer.from(resized.base64, 'base64'), {
     useTArray: true, formatAsRGBA: true,
   });
+
+  console.log(`[Refs] Decoded "${img.name}": ${decoded.width}×${decoded.height}`);
 
   // For reference images: use center region (marker is centered in reference images)
   return computeFeatures(decoded.data, decoded.width, decoded.height, true);
