@@ -1,4 +1,4 @@
-import React, { useRef, useState, useCallback } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
   Dimensions, ActivityIndicator, Animated, Vibration,
@@ -7,6 +7,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { detectMarker } from '../utils/markerDetector';
 import { resizeForDetection } from '../utils/imageProcessor';
+import { loadReferenceImages, isReferencesReady } from '../utils/referenceHashes';
 import { MARKER_SPEC } from '../constants/markerSpec';
 
 const { width: SW } = Dimensions.get('window');
@@ -19,10 +20,12 @@ export default function CameraScreen() {
   const camRef = useRef<any>(null);
   const [perm, requestPerm] = useCameraPermissions();
 
-  const [analyzing, setAnalyzing] = useState(false);
-  const [card,      setCard]      = useState<Card>('none');
-  const [captured,  setCaptured]  = useState<string[]>([]);
-  const [detailMsg, setDetailMsg] = useState('');
+  const [analyzing, setAnalyzing]     = useState(false);
+  const [card, setCard]               = useState<Card>('none');
+  const [captured, setCaptured]       = useState<string[]>([]);
+  const [detailMsg, setDetailMsg]     = useState('');
+  const [refsReady, setRefsReady]     = useState(false);
+  const [loadingRefs, setLoadingRefs] = useState(true);
 
   const scale   = useRef(new Animated.Value(0.5)).current;
   const opacity = useRef(new Animated.Value(0)).current;
@@ -32,6 +35,25 @@ export default function CameraScreen() {
   const scanningRef  = useRef(false);
 
   capturedRef.current = captured;
+
+  // ── Load reference images on mount ────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const count = await loadReferenceImages();
+        if (!cancelled) {
+          setRefsReady(true);
+          setLoadingRefs(false);
+          console.log(`[Camera] ${count} references ready`);
+        }
+      } catch (err) {
+        console.warn('[Camera] Failed to load references:', err);
+        if (!cancelled) setLoadingRefs(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   useFocusEffect(useCallback(() => { return () => {}; }, []));
 
@@ -45,7 +67,6 @@ export default function CameraScreen() {
       Animated.spring(scale, { toValue: 1, speed: 25, bounciness: 12, useNativeDriver: true }),
       Animated.timing(opacity, { toValue: 1, duration: 80, useNativeDriver: true }),
     ]).start();
-
     Vibration.vibrate(type === 'correct' ? [0, 60, 60, 60] : [0, 200]);
 
     if (cardTimer.current) clearTimeout(cardTimer.current);
@@ -55,9 +76,9 @@ export default function CameraScreen() {
     }, type === 'correct' ? 2500 : 1500);
   }, []);
 
-  // ── Scan: capture → resize → detect ──────────────────────────────────────
+  // ── Scan: capture → resize → compare against references ──────────────────
   const doScan = useCallback(async () => {
-    if (!camRef.current || !camReadyRef.current) return;
+    if (!camRef.current || !camReadyRef.current || !refsReady) return;
     if (scanningRef.current) return;
     scanningRef.current = true;
     setAnalyzing(true);
@@ -68,10 +89,8 @@ export default function CameraScreen() {
       });
       if (!photo?.uri) { setAnalyzing(false); scanningRef.current = false; return; }
 
-      // Resize to 128×128 for analysis
       const small = await resizeForDetection(photo.uri, 128);
 
-      // Decode JPEG → raw pixels
       const jpeg = require('jpeg-js');
       const { Buffer } = require('buffer');
       const decoded = jpeg.decode(
@@ -81,7 +100,6 @@ export default function CameraScreen() {
 
       setAnalyzing(false);
 
-      // Run detection
       const result = detectMarker(decoded.data, decoded.width, decoded.height);
 
       if (result.markerFound && result.isCorrectMarker) {
@@ -100,7 +118,7 @@ export default function CameraScreen() {
       setAnalyzing(false);
       scanningRef.current = false;
     }
-  }, [showCard, nav]);
+  }, [showCard, nav, refsReady]);
 
   const onCamReady = useCallback(() => { camReadyRef.current = true; }, []);
 
@@ -131,7 +149,6 @@ export default function CameraScreen() {
         onCameraReady={onCamReady}
       />
 
-      {/* Scan guide */}
       <View style={s.guideWrap} pointerEvents="none">
         <View style={s.guide}>
           <View style={[s.corner, s.tl]} />
@@ -139,12 +156,11 @@ export default function CameraScreen() {
           <View style={[s.corner, s.bl]} />
           <View style={[s.corner, s.br]} />
           <Text style={s.guideText}>
-            {analyzing ? 'Analyzing…' : 'Point at marker & tap Scan'}
+            {loadingRefs ? 'Loading references…' : analyzing ? 'Analyzing…' : 'Point at marker & tap Scan'}
           </Text>
         </View>
       </View>
 
-      {/* Result card */}
       {card !== 'none' && (
         <View style={s.cardWrap} pointerEvents="none">
           <Animated.View style={[
@@ -165,11 +181,12 @@ export default function CameraScreen() {
         </View>
       )}
 
-      {/* Top bar */}
       <View style={s.topBar}>
         <View style={s.pill}>
-          {analyzing && <ActivityIndicator size="small" color="#00ff88" style={{ marginRight: 6 }} />}
-          <Text style={s.pillTxt}>{analyzing ? 'Analyzing…' : '● Ready'}</Text>
+          {(analyzing || loadingRefs) && <ActivityIndicator size="small" color="#00ff88" style={{ marginRight: 6 }} />}
+          <Text style={s.pillTxt}>
+            {loadingRefs ? 'Loading…' : analyzing ? 'Analyzing…' : '● Ready'}
+          </Text>
         </View>
         <View style={s.countPill}>
           <Text style={s.countTxt}>{captured.length} / {TARGET}</Text>
@@ -179,7 +196,6 @@ export default function CameraScreen() {
         <View style={[s.progFill, { width: `${(captured.length / TARGET) * 100}%` }]} />
       </View>
 
-      {/* Bottom controls */}
       <View style={s.bottom}>
         {captured.length > 0 && card === 'none' && !analyzing && (
           <TouchableOpacity
@@ -192,21 +208,20 @@ export default function CameraScreen() {
           </TouchableOpacity>
         )}
         <TouchableOpacity
-          style={[s.scanBtn, (analyzing || card !== 'none') && s.scanBtnOff]}
+          style={[s.scanBtn, (analyzing || card !== 'none' || !refsReady) && s.scanBtnOff]}
           onPress={doScan}
-          disabled={analyzing || card !== 'none'}
+          disabled={analyzing || card !== 'none' || !refsReady}
           activeOpacity={0.7}
         >
           {analyzing
             ? <ActivityIndicator size="small" color="#002a10" />
-            : <Text style={s.scanBtnTxt}>SCAN</Text>}
+            : <Text style={s.scanBtnTxt}>{refsReady ? 'SCAN' : '...'}</Text>}
         </TouchableOpacity>
       </View>
     </View>
   );
 }
 
-// ── Styles ──────────────────────────────────────────────────────────────────────
 const CS = 28, CT = 3;
 const s = StyleSheet.create({
   root:   { flex: 1, backgroundColor: '#000' },

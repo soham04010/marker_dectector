@@ -11,6 +11,14 @@
           "cameraPermission": "Allow MarkerDetector to access your camera to scan markers."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "c4c25f5a-ec46-4f29-a42c-2e484184feff"
+      }
+    },
+    "android": {
+      "package": "com.soham041.MarkerDetector"
+    }
   }
 }
