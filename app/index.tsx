@@ -1,322 +1,251 @@
-import React, {
-  useRef, useState, useEffect, useCallback,
-} from 'react';
+import React, { useRef, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  Dimensions, ActivityIndicator, Alert,
+  Dimensions, ActivityIndicator, Animated, Vibration,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { detectMarker } from '../utils/markerDetector';
+import { resizeForDetection } from '../utils/imageProcessor';
+import { MARKER_SPEC } from '../constants/markerSpec';
 
-import CameraViewComp from '../components/CameraView';
-import { detectMarker, BoundingBox } from '../utils/markerDetector';
-import { resizeForDetection, cropAndResize } from '../utils/imageProcessor';
+const { width: SW } = Dimensions.get('window');
+const TARGET = MARKER_SPEC.targetCount;
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-const DETECT_SIZE   = 400; // size we scale image to for detection
-const TARGET_COUNT  = 20;
-const SCAN_INTERVAL = 1500; // ms between scans
+type Card = 'none' | 'correct' | 'incorrect';
 
 export default function CameraScreen() {
-  const navigation = useNavigation<any>();
-  const cameraRef  = useRef<any>(null);
+  const nav    = useNavigation<any>();
+  const camRef = useRef<any>(null);
+  const [perm, requestPerm] = useCameraPermissions();
 
-  const [permission, requestPermission] = useCameraPermissions();
-  const [cameraReady, setCameraReady]   = useState(false);
-  const [isScanning, setIsScanning]     = useState(false);
-  const [captured, setCaptured]         = useState<string[]>([]);
-  const [overlayBox, setOverlayBox]     = useState<BoundingBox | null>(null);
-  const [status, setStatus]             = useState('Press Start to begin scanning');
-  const [processing, setProcessing]     = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [card,      setCard]      = useState<Card>('none');
+  const [captured,  setCaptured]  = useState<string[]>([]);
+  const [detailMsg, setDetailMsg] = useState('');
 
-  const isRunning   = useRef(false);
-  const capturedRef = useRef<string[]>([]);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const scale   = useRef(new Animated.Value(0.5)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+  const capturedRef  = useRef<string[]>([]);
+  const camReadyRef  = useRef(false);
+  const cardTimer    = useRef<any>(null);
+  const scanningRef  = useRef(false);
 
-  // Keep ref synced with state
-  useEffect(() => { capturedRef.current = captured; }, [captured]);
+  capturedRef.current = captured;
 
-  // Auto-navigate when 20 collected
-  useEffect(() => {
-    if (captured.length >= TARGET_COUNT) {
-      setIsScanning(false);
-      navigation.navigate('Results', { markers: captured });
-    }
-  }, [captured]);
+  useFocusEffect(useCallback(() => { return () => {}; }, []));
 
-  // ── Single detection cycle ─────────────────────────────────────────────────
-  const runDetection = useCallback(async () => {
-    if (isRunning.current) return;
-    if (!cameraRef.current) return;
-    if (capturedRef.current.length >= TARGET_COUNT) return;
+  // ── Animated result card ──────────────────────────────────────────────────
+  const showCard = useCallback((type: Card, detail?: string) => {
+    setCard(type);
+    if (detail) setDetailMsg(detail);
+    scale.setValue(0.5);
+    opacity.setValue(0);
+    Animated.parallel([
+      Animated.spring(scale, { toValue: 1, speed: 25, bounciness: 12, useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 1, duration: 80, useNativeDriver: true }),
+    ]).start();
 
-    isRunning.current = true;
-    setProcessing(true);
+    Vibration.vibrate(type === 'correct' ? [0, 60, 60, 60] : [0, 200]);
 
-    try {
-      // 1 — Take picture
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.6,
-        skipProcessing: true,
-        base64: false,
-      });
-
-      if (!photo?.uri) return;
-
-      // 2 — Resize to 400×400 for detection + get base64
-      const small = await resizeForDetection(photo.uri, DETECT_SIZE);
-
-      // 3 — Decode JPEG pixels using jpeg-js
-      const jpeg     = require('jpeg-js');
-      const buf      = Buffer.from(small.base64, 'base64');
-      const decoded  = jpeg.decode(buf, { useTArray: true, formatAsRGBA: true });
-
-      // 4 — Run marker detection
-      const result   = detectMarker(decoded.data, decoded.width, decoded.height);
-
-      if (result.detected && result.boundingBox) {
-        setOverlayBox(result.boundingBox);
-        setStatus(
-          `✓ Marker found! Saving ${capturedRef.current.length + 1}/${TARGET_COUNT}`
-        );
-
-        // 5 — Crop from original full-res photo
-        const scaleX  = small.origWidth  / DETECT_SIZE;
-        const scaleY  = small.origHeight / DETECT_SIZE;
-        const cropped = await cropAndResize(
-          photo.uri,
-          result.boundingBox.x,
-          result.boundingBox.y,
-          result.boundingBox.size,
-          scaleX, scaleY,
-          small.origWidth,
-          small.origHeight
-        );
-
-        // 6 — Store result
-        setCaptured(prev => [...prev, cropped]);
-
-        // Fade overlay after 600ms
-        setTimeout(() => setOverlayBox(null), 600);
-      } else {
-        setOverlayBox(null);
-        setStatus('Scanning… hold marker steady');
-      }
-    } catch (err: any) {
-      console.warn('Detection error:', err?.message ?? err);
-      setStatus('Error — retrying…');
-    } finally {
-      isRunning.current = false;
-      setProcessing(false);
-    }
+    if (cardTimer.current) clearTimeout(cardTimer.current);
+    cardTimer.current = setTimeout(() => {
+      Animated.timing(opacity, { toValue: 0, duration: 250, useNativeDriver: true })
+        .start(() => { setCard('none'); scanningRef.current = false; });
+    }, type === 'correct' ? 2500 : 1500);
   }, []);
 
-  // ── Interval management ────────────────────────────────────────────────────
-  useEffect(() => {
-    if (isScanning && cameraReady) {
-      intervalRef.current = setInterval(runDetection, SCAN_INTERVAL);
-      setStatus('Scanning… point at Marker 1');
-    } else {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
+  // ── Scan: capture → resize → detect ──────────────────────────────────────
+  const doScan = useCallback(async () => {
+    if (!camRef.current || !camReadyRef.current) return;
+    if (scanningRef.current) return;
+    scanningRef.current = true;
+    setAnalyzing(true);
+
+    try {
+      const photo = await camRef.current.takePictureAsync({
+        quality: 0.4, skipProcessing: true, base64: false,
+      });
+      if (!photo?.uri) { setAnalyzing(false); scanningRef.current = false; return; }
+
+      // Resize to 128×128 for analysis
+      const small = await resizeForDetection(photo.uri, 128);
+
+      // Decode JPEG → raw pixels
+      const jpeg = require('jpeg-js');
+      const { Buffer } = require('buffer');
+      const decoded = jpeg.decode(
+        Buffer.from(small.base64, 'base64'),
+        { useTArray: true, formatAsRGBA: true }
+      );
+
+      setAnalyzing(false);
+
+      // Run detection
+      const result = detectMarker(decoded.data, decoded.width, decoded.height);
+
+      if (result.markerFound && result.isCorrectMarker) {
+        showCard('correct', result.details);
+        const next = [...capturedRef.current, photo.uri];
+        capturedRef.current = next;
+        setCaptured(next);
+        if (next.length >= TARGET) {
+          setTimeout(() => nav.navigate('Results', { markers: next }), 2500);
+        }
+      } else {
+        showCard('incorrect', result.details);
       }
-      if (!isScanning) setStatus('Press Start to begin scanning');
+    } catch (e: any) {
+      console.warn('[Scan] Error:', e?.message);
+      setAnalyzing(false);
+      scanningRef.current = false;
     }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [isScanning, cameraReady]);
+  }, [showCard, nav]);
 
-  // ── Permission states ──────────────────────────────────────────────────────
-  if (!permission) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color="#00ff88" />
-        <Text style={styles.dimText}>Loading camera…</Text>
-      </View>
-    );
-  }
+  const onCamReady = useCallback(() => { camReadyRef.current = true; }, []);
 
-  if (!permission.granted) {
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.white}>📷 Camera access needed</Text>
-        <TouchableOpacity style={styles.btn} onPress={requestPermission}>
-          <Text style={styles.btnText}>Grant Permission</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
+  // ── Permission ────────────────────────────────────────────────────────────
+  if (!perm) return (
+    <View style={s.center}>
+      <ActivityIndicator size="large" color="#00ff88" />
+    </View>
+  );
+  if (!perm.granted) return (
+    <View style={s.center}>
+      <Text style={s.permIcon}>📸</Text>
+      <Text style={s.permTitle}>Camera Access Required</Text>
+      <Text style={s.permSub}>We need camera access to scan markers.</Text>
+      <TouchableOpacity style={s.grantBtn} onPress={requestPerm}>
+        <Text style={s.grantTxt}>Grant Permission</Text>
+      </TouchableOpacity>
+    </View>
+  );
 
-  // Scale detection coords → screen coords
-  const displayScale = SCREEN_W / DETECT_SIZE;
-
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Main UI ───────────────────────────────────────────────────────────────
   return (
-    <View style={styles.root}>
-
-      {/* Camera */}
-      <CameraViewComp
-        cameraRef={cameraRef}
-        onReady={() => setCameraReady(true)}
-        overlayBox={overlayBox}
-        displayScale={displayScale}
+    <View style={s.root}>
+      <CameraView
+        ref={camRef}
+        style={StyleSheet.absoluteFill}
+        facing="back"
+        onCameraReady={onCamReady}
       />
 
-      {/* Top HUD */}
-      <View style={styles.topHud}>
-        <Text style={styles.statusText}>{status}</Text>
-        <Text style={styles.countBadge}>
-          {captured.length} / {TARGET_COUNT}
-        </Text>
+      {/* Scan guide */}
+      <View style={s.guideWrap} pointerEvents="none">
+        <View style={s.guide}>
+          <View style={[s.corner, s.tl]} />
+          <View style={[s.corner, s.tr]} />
+          <View style={[s.corner, s.bl]} />
+          <View style={[s.corner, s.br]} />
+          <Text style={s.guideText}>
+            {analyzing ? 'Analyzing…' : 'Point at marker & tap Scan'}
+          </Text>
+        </View>
       </View>
 
-      {/* Progress bar */}
-      <View style={styles.progressBg}>
-        <View
-          style={[
-            styles.progressFill,
-            { width: `${(captured.length / TARGET_COUNT) * 100}%` },
-          ]}
-        />
-      </View>
-
-      {/* Processing indicator */}
-      {processing && (
-        <View style={styles.processingBadge}>
-          <ActivityIndicator size="small" color="#00ff88" />
-          <Text style={styles.processingText}>Analysing…</Text>
+      {/* Result card */}
+      {card !== 'none' && (
+        <View style={s.cardWrap} pointerEvents="none">
+          <Animated.View style={[
+            s.card,
+            card === 'correct' ? s.cardGreen : s.cardRed,
+            { opacity, transform: [{ scale }] },
+          ]}>
+            <Text style={s.icon}>{card === 'correct' ? '✓' : '✗'}</Text>
+            <Text style={s.title}>
+              {card === 'correct' ? 'Scan Successful!' : 'Try Again'}
+            </Text>
+            <Text style={s.sub}>
+              {card === 'correct'
+                ? `${capturedRef.current.length} of ${TARGET} saved`
+                : detailMsg || 'Not a valid marker'}
+            </Text>
+          </Animated.View>
         </View>
       )}
 
-      {/* Bottom controls */}
-      <View style={styles.bottomBar}>
-        <TouchableOpacity
-          style={[styles.startBtn, isScanning && styles.startBtnActive]}
-          onPress={() => setIsScanning(v => !v)}
-          disabled={!cameraReady}
-        >
-          <Text style={styles.startBtnText}>
-            {isScanning ? '⏸  Pause' : '▶  Start Scan'}
-          </Text>
-        </TouchableOpacity>
+      {/* Top bar */}
+      <View style={s.topBar}>
+        <View style={s.pill}>
+          {analyzing && <ActivityIndicator size="small" color="#00ff88" style={{ marginRight: 6 }} />}
+          <Text style={s.pillTxt}>{analyzing ? 'Analyzing…' : '● Ready'}</Text>
+        </View>
+        <View style={s.countPill}>
+          <Text style={s.countTxt}>{captured.length} / {TARGET}</Text>
+        </View>
+      </View>
+      <View style={s.progBg}>
+        <View style={[s.progFill, { width: `${(captured.length / TARGET) * 100}%` }]} />
+      </View>
 
-        {captured.length > 0 && (
+      {/* Bottom controls */}
+      <View style={s.bottom}>
+        {captured.length > 0 && card === 'none' && !analyzing && (
           <TouchableOpacity
-            style={styles.viewBtn}
-            onPress={() => navigation.navigate('Results', { markers: captured })}
+            style={s.viewBtn}
+            onPress={() => nav.navigate('Results', { markers: captured })}
           >
-            <Text style={styles.viewBtnText}>
-              View {captured.length} results →
+            <Text style={s.viewTxt}>
+              View {captured.length} result{captured.length !== 1 ? 's' : ''} →
             </Text>
           </TouchableOpacity>
         )}
+        <TouchableOpacity
+          style={[s.scanBtn, (analyzing || card !== 'none') && s.scanBtnOff]}
+          onPress={doScan}
+          disabled={analyzing || card !== 'none'}
+          activeOpacity={0.7}
+        >
+          {analyzing
+            ? <ActivityIndicator size="small" color="#002a10" />
+            : <Text style={s.scanBtnTxt}>SCAN</Text>}
+        </TouchableOpacity>
       </View>
-
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  root:    { flex: 1, backgroundColor: '#000' },
-  centered:{
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#0d0d1a',
-    gap: 20,
-  },
-  white:   { color: '#fff', fontSize: 18, marginBottom: 10 },
-  dimText: { color: '#888', marginTop: 12, fontSize: 14 },
+// ── Styles ──────────────────────────────────────────────────────────────────────
+const CS = 28, CT = 3;
+const s = StyleSheet.create({
+  root:   { flex: 1, backgroundColor: '#000' },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0a0a18', gap: 16 },
+  permIcon:  { fontSize: 52 },
+  permTitle: { color: '#fff', fontSize: 20, fontWeight: '700' },
+  permSub:   { color: 'rgba(255,255,255,0.5)', fontSize: 14, textAlign: 'center', paddingHorizontal: 40 },
+  grantBtn:  { backgroundColor: '#00ff88', paddingHorizontal: 36, paddingVertical: 14, borderRadius: 30, marginTop: 8 },
+  grantTxt:  { color: '#002a10', fontWeight: '700', fontSize: 15 },
 
-  // HUD
-  topHud: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    paddingTop: 52,
-    paddingBottom: 12,
-    paddingHorizontal: 20,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.60)',
-  },
-  statusText:  { color: '#ddd', fontSize: 13, flex: 1, marginRight: 8 },
-  countBadge:  {
-    color: '#00ff88',
-    fontSize: 17,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
+  guideWrap: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
+  guide:     { width: SW * 0.72, height: SW * 0.72, alignItems: 'center', justifyContent: 'center' },
+  guideText: { color: 'rgba(255,255,255,0.35)', fontSize: 11, letterSpacing: 1, textTransform: 'uppercase', textAlign: 'center' },
+  corner:    { position: 'absolute', width: CS, height: CS, borderColor: 'rgba(0,255,136,0.45)' },
+  tl: { top: 0, left: 0, borderTopWidth: CT, borderLeftWidth: CT },
+  tr: { top: 0, right: 0, borderTopWidth: CT, borderRightWidth: CT },
+  bl: { bottom: 0, left: 0, borderBottomWidth: CT, borderLeftWidth: CT },
+  br: { bottom: 0, right: 0, borderBottomWidth: CT, borderRightWidth: CT },
 
-  // Progress
-  progressBg: {
-    position: 'absolute',
-    top: 98,
-    left: 0,
-    right: 0,
-    height: 3,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-  },
-  progressFill: {
-    height: 3,
-    backgroundColor: '#00ff88',
-  },
+  cardWrap:  { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', zIndex: 10 },
+  card:      { width: SW * 0.78, paddingVertical: 44, paddingHorizontal: 32, borderRadius: 32, alignItems: 'center', gap: 10, borderWidth: 3 },
+  cardGreen: { backgroundColor: 'rgba(0,20,10,0.97)', borderColor: '#00ff88' },
+  cardRed:   { backgroundColor: 'rgba(28,0,0,0.97)',   borderColor: '#ff4040' },
+  icon:      { fontSize: 80, color: '#fff', lineHeight: 88 },
+  title:     { color: '#fff', fontSize: 30, fontWeight: '800', textAlign: 'center' },
+  sub:       { color: 'rgba(255,255,255,0.55)', fontSize: 14, textAlign: 'center', marginTop: 4 },
 
-  // Processing badge
-  processingBadge: {
-    position: 'absolute',
-    top: 110,
-    alignSelf: 'center',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(0,0,0,0.65)',
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 20,
-  },
-  processingText: { color: '#00ff88', fontSize: 12 },
+  topBar:    { position: 'absolute', top: 0, left: 0, right: 0, paddingTop: 52, paddingBottom: 12, paddingHorizontal: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.55)' },
+  pill:      { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.10)', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20 },
+  pillTxt:   { color: '#aaa', fontSize: 13 },
+  countPill: { backgroundColor: 'rgba(0,255,136,0.12)', paddingHorizontal: 18, paddingVertical: 7, borderRadius: 20, borderWidth: 2, borderColor: '#00ff88' },
+  countTxt:  { color: '#00ff88', fontSize: 17, fontWeight: '800', letterSpacing: 1 },
+  progBg:    { position: 'absolute', top: 100, left: 0, right: 0, height: 3, backgroundColor: 'rgba(255,255,255,0.06)' },
+  progFill:  { height: 3, backgroundColor: '#00ff88', borderRadius: 2 },
 
-  // Bottom
-  bottomBar: {
-    position: 'absolute',
-    bottom: 44,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    gap: 14,
-  },
-  startBtn: {
-    paddingHorizontal: 44,
-    paddingVertical: 15,
-    borderRadius: 32,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    borderWidth: 2,
-    borderColor: '#444',
-  },
-  startBtnActive: {
-    borderColor: '#00ff88',
-    backgroundColor: 'rgba(0,40,20,0.80)',
-  },
-  startBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-
-  viewBtn: {
-    paddingHorizontal: 28,
-    paddingVertical: 12,
-    borderRadius: 28,
-    backgroundColor: '#00ff88',
-  },
-  viewBtnText: { color: '#002a10', fontSize: 14, fontWeight: '700' },
-
-  btn: {
-    backgroundColor: '#00ff88',
-    paddingHorizontal: 32,
-    paddingVertical: 14,
-    borderRadius: 30,
-  },
-  btnText: { color: '#002a10', fontWeight: '700', fontSize: 15 },
+  bottom:    { position: 'absolute', bottom: 40, left: 0, right: 0, alignItems: 'center', gap: 14 },
+  viewBtn:   { paddingHorizontal: 28, paddingVertical: 12, borderRadius: 24, backgroundColor: 'rgba(0,255,136,0.15)', borderWidth: 1, borderColor: 'rgba(0,255,136,0.4)' },
+  viewTxt:   { color: '#00ff88', fontSize: 14, fontWeight: '600' },
+  scanBtn:   { width: 80, height: 80, borderRadius: 40, backgroundColor: '#00ff88', alignItems: 'center', justifyContent: 'center', elevation: 10 },
+  scanBtnOff:{ backgroundColor: 'rgba(0,255,136,0.3)', elevation: 0 },
+  scanBtnTxt:{ fontSize: 14, color: '#002a10', fontWeight: '900', letterSpacing: 2 },
 });
