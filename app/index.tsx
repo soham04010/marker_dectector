@@ -37,23 +37,28 @@ export default function CameraScreen() {
   capturedRef.current = captured;
 
   // ── Load reference images on mount ────────────────────────────────────────
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const count = await loadReferenceImages();
-        if (!cancelled) {
-          setRefsReady(true);
-          setLoadingRefs(false);
-          console.log(`[Camera] ${count} references ready`);
-        }
-      } catch (err) {
-        console.warn('[Camera] Failed to load references:', err);
-        if (!cancelled) setLoadingRefs(false);
+  const [loadError, setLoadError] = useState('');
+
+  const loadRefs = useCallback(async () => {
+    setLoadingRefs(true);
+    setLoadError('');
+    try {
+      const count = await loadReferenceImages();
+      if (count > 0) {
+        setRefsReady(true);
+        console.log(`[Camera] ${count} references ready`);
+      } else {
+        setLoadError(`Loaded 0 references — assets may not be bundled`);
+        console.error('[Camera] 0 references loaded!');
       }
-    })();
-    return () => { cancelled = true; };
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load references');
+      console.error('[Camera] Load error:', err);
+    }
+    setLoadingRefs(false);
   }, []);
+
+  useEffect(() => { loadRefs(); }, []);
 
   useFocusEffect(useCallback(() => { return () => {}; }, []));
 
@@ -149,15 +154,29 @@ export default function CameraScreen() {
         onCameraReady={onCamReady}
       />
 
-      <View style={s.guideWrap} pointerEvents="none">
+      <View style={s.guideWrap} pointerEvents={loadError ? 'auto' : 'none'}>
         <View style={s.guide}>
           <View style={[s.corner, s.tl]} />
           <View style={[s.corner, s.tr]} />
           <View style={[s.corner, s.bl]} />
           <View style={[s.corner, s.br]} />
-          <Text style={s.guideText}>
-            {loadingRefs ? 'Loading references…' : analyzing ? 'Analyzing…' : 'Point at marker & tap Scan'}
-          </Text>
+          {loadError ? (
+            <>
+              <Text style={[s.guideText, { color: '#ff6666', fontSize: 13 }]}>
+                {loadError}
+              </Text>
+              <TouchableOpacity
+                style={{ marginTop: 12, backgroundColor: '#00ff88', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 16 }}
+                onPress={loadRefs}
+              >
+                <Text style={{ color: '#002a10', fontWeight: '700', fontSize: 13 }}>Retry</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <Text style={s.guideText}>
+              {loadingRefs ? 'Loading references…' : analyzing ? 'Analyzing…' : 'Point at marker & tap Scan'}
+            </Text>
+          )}
         </View>
       </View>
 
